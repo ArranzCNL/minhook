@@ -63,7 +63,12 @@ typedef struct _HOOK_ENTRY
     LPVOID pTarget;             // Address of the target function.
     LPVOID pDetour;             // Address of the detour or relay function.
     LPVOID pTrampoline;         // Address of the trampoline function.
+
+#if defined(_M_X64) || defined(__x86_64__)
+    UINT16 backup[16];          // Absolute jumps have larger prologues.
+#else
     UINT8  backup[8];           // Original prologue of the target function.
+#endif
 
     UINT8  patchAbove  : 1;     // Uses the hot patch area.
     UINT8  isEnabled   : 1;     // Enabled.
@@ -164,7 +169,7 @@ static DWORD_PTR FindOldIP(PHOOK_ENTRY pHook, DWORD_PTR ip)
 {
     UINT i;
 
-    if (pHook->patchAbove && ip == ((DWORD_PTR)pHook->pTarget - sizeof(JMP_REL)))
+    if (pHook->patchAbove && ip == ((DWORD_PTR)pHook->pTarget - sizeof(ARCH_JMP)))
         return (DWORD_PTR)pHook->pTarget;
 
     for (i = 0; i < pHook->nIP; ++i)
@@ -172,12 +177,6 @@ static DWORD_PTR FindOldIP(PHOOK_ENTRY pHook, DWORD_PTR ip)
         if (ip == ((DWORD_PTR)pHook->pTrampoline + pHook->newIPs[i]))
             return (DWORD_PTR)pHook->pTarget + pHook->oldIPs[i];
     }
-
-#if defined(_M_X64) || defined(__x86_64__)
-    // Check relay function.
-    if (ip == (DWORD_PTR)pHook->pDetour)
-        return (DWORD_PTR)pHook->pTarget;
-#endif
 
     return 0;
 }
@@ -378,21 +377,30 @@ static MH_STATUS EnableHookLL(UINT pos, BOOL enable)
 {
     PHOOK_ENTRY pHook = &g_hooks.pItems[pos];
     DWORD  oldProtect;
-    SIZE_T patchSize    = sizeof(JMP_REL);
+    SIZE_T patchSize    = sizeof(ARCH_JMP);
     LPBYTE pPatchTarget = (LPBYTE)pHook->pTarget;
 
+#if !defined(_M_X64)  && !defined(__x86_64__)
     if (pHook->patchAbove)
     {
         pPatchTarget -= sizeof(JMP_REL);
         patchSize    += sizeof(JMP_REL_SHORT);
     }
+#endif
 
     if (!VirtualProtect(pPatchTarget, patchSize, PAGE_EXECUTE_READWRITE, &oldProtect))
         return MH_ERROR_MEMORY_PROTECT;
 
     if (enable)
     {
-        PJMP_REL pJmp = (PJMP_REL)pPatchTarget;
+        PARCH_JMP pJmp = (PARCH_JMP)pPatchTarget;
+
+#if defined(_M_X64) || defined(__x86_64__)
+        pJmp->opcode0 = 0xFF;
+        pJmp->opcode1 = 0x25;
+        pJmp->dummy = 0x00000000;
+        pJmp->address = (UINT64)((LPBYTE)pHook->pDetour);
+#else
         pJmp->opcode = 0xE9;
         pJmp->operand = (UINT32)((LPBYTE)pHook->pDetour - (pPatchTarget + sizeof(JMP_REL)));
 
@@ -402,13 +410,14 @@ static MH_STATUS EnableHookLL(UINT pos, BOOL enable)
             pShortJmp->opcode = 0xEB;
             pShortJmp->operand = (UINT8)(0 - (sizeof(JMP_REL_SHORT) + sizeof(JMP_REL)));
         }
+#endif
     }
     else
     {
         if (pHook->patchAbove)
-            memcpy(pPatchTarget, pHook->backup, sizeof(JMP_REL) + sizeof(JMP_REL_SHORT));
+            memcpy(pPatchTarget, pHook->backup, sizeof(ARCH_JMP) + sizeof(JMP_REL_SHORT));
         else
-            memcpy(pPatchTarget, pHook->backup, sizeof(JMP_REL));
+            memcpy(pPatchTarget, pHook->backup, sizeof(ARCH_JMP));
     }
 
     VirtualProtect(pPatchTarget, patchSize, oldProtect, &oldProtect);
@@ -416,8 +425,8 @@ static MH_STATUS EnableHookLL(UINT pos, BOOL enable)
     // Just-in-case measure.
     FlushInstructionCache(GetCurrentProcess(), pPatchTarget, patchSize);
 
-    pHook->isEnabled   = enable;
-    pHook->queueEnable = enable;
+    pHook->isEnabled   = (UINT8)enable;
+    pHook->queueEnable = (UINT8)enable;
 
     return MH_OK;
 }
@@ -587,13 +596,9 @@ MH_STATUS WINAPI MH_CreateHook(LPVOID pTarget, LPVOID pDetour, LPVOID *ppOrigina
                         if (pHook != NULL)
                         {
                             pHook->pTarget     = ct.pTarget;
-#if defined(_M_X64) || defined(__x86_64__)
-                            pHook->pDetour     = ct.pRelay;
-#else
                             pHook->pDetour     = ct.pDetour;
-#endif
                             pHook->pTrampoline = ct.pTrampoline;
-                            pHook->patchAbove  = ct.patchAbove;
+                            pHook->patchAbove  = (UINT8)ct.patchAbove;
                             pHook->isEnabled   = FALSE;
                             pHook->queueEnable = FALSE;
                             pHook->nIP         = ct.nIP;
@@ -611,7 +616,7 @@ MH_STATUS WINAPI MH_CreateHook(LPVOID pTarget, LPVOID pDetour, LPVOID *ppOrigina
                             }
                             else
                             {
-                                memcpy(pHook->backup, pTarget, sizeof(JMP_REL));
+                                memcpy(pHook->backup, pTarget, sizeof(ARCH_JMP));
                             }
 
                             if (ppOriginal != NULL)
@@ -777,14 +782,14 @@ static MH_STATUS QueueHook(LPVOID pTarget, BOOL queueEnable)
         {
             UINT i;
             for (i = 0; i < g_hooks.size; ++i)
-                g_hooks.pItems[i].queueEnable = queueEnable;
+                g_hooks.pItems[i].queueEnable = (UINT8)queueEnable;
         }
         else
         {
             UINT pos = FindHookEntry(pTarget);
             if (pos != INVALID_HOOK_POS)
             {
-                g_hooks.pItems[pos].queueEnable = queueEnable;
+                g_hooks.pItems[pos].queueEnable = (UINT8)queueEnable;
             }
             else
             {

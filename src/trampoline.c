@@ -130,7 +130,7 @@ BOOL CreateTrampolineFunction(PTRAMPOLINE ct)
             return FALSE;
 
         pCopySrc = (LPVOID)pOldInst;
-        if (oldPos >= sizeof(JMP_REL))
+        if (oldPos >= sizeof(ARCH_JMP))
         {
             // The trampoline function is long enough.
             // Complete the function with the jump to the target function.
@@ -194,7 +194,7 @@ BOOL CreateTrampolineFunction(PTRAMPOLINE ct)
 
             // Simply copy an internal jump.
             if ((ULONG_PTR)ct->pTarget <= dest
-                && dest < ((ULONG_PTR)ct->pTarget + sizeof(JMP_REL)))
+                && dest < ((ULONG_PTR)ct->pTarget + sizeof(ARCH_JMP)))
             {
                 if (jmpDest < dest)
                     jmpDest = dest;
@@ -228,7 +228,7 @@ BOOL CreateTrampolineFunction(PTRAMPOLINE ct)
 
             // Simply copy an internal jump.
             if ((ULONG_PTR)ct->pTarget <= dest
-                && dest < ((ULONG_PTR)ct->pTarget + sizeof(JMP_REL)))
+                && dest < ((ULONG_PTR)ct->pTarget + sizeof(ARCH_JMP)))
             {
                 if (jmpDest < dest)
                     jmpDest = dest;
@@ -283,13 +283,13 @@ BOOL CreateTrampolineFunction(PTRAMPOLINE ct)
 #else
         __movsb((LPBYTE)ct->pTrampoline + newPos, (LPBYTE)pCopySrc, copySize);
 #endif
-        newPos += copySize;
+        newPos += (UINT8)copySize;
         oldPos += hs.len;
     }
     while (!finished);
 
     // Is there enough place for a long jump?
-    if (oldPos < sizeof(JMP_REL)
+    if (oldPos < sizeof(ARCH_JMP)
         && !IsCodePadding((LPBYTE)ct->pTarget + oldPos, sizeof(JMP_REL) - oldPos))
     {
         // Is there enough place for a short jump?
@@ -300,22 +300,14 @@ BOOL CreateTrampolineFunction(PTRAMPOLINE ct)
         }
 
         // Can we place the long jump above the function?
-        if (!IsExecutableAddress((LPBYTE)ct->pTarget - sizeof(JMP_REL)))
+        if (!IsExecutableAddress((LPBYTE)ct->pTarget - sizeof(ARCH_JMP)))
             return FALSE;
 
-        if (!IsCodePadding((LPBYTE)ct->pTarget - sizeof(JMP_REL), sizeof(JMP_REL)))
+        if (!IsCodePadding((LPBYTE)ct->pTarget - sizeof(ARCH_JMP), sizeof(ARCH_JMP)))
             return FALSE;
 
         ct->patchAbove = TRUE;
     }
-
-#if defined(_M_X64) || defined(__x86_64__)
-    // Create a relay function.
-    jmp.address = (ULONG_PTR)ct->pDetour;
-
-    ct->pRelay = (LPBYTE)ct->pTrampoline + newPos;
-    memcpy(ct->pRelay, &jmp, sizeof(jmp));
-#endif
 
     return TRUE;
 }
